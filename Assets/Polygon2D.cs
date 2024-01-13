@@ -2,6 +2,8 @@ using System.Linq;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using System.Collections.Generic;
+using UnityEngine.Assertions;
+
 
 
 #if UNITY_EDITOR
@@ -15,24 +17,22 @@ namespace UnityEditor
     [RequireComponent(typeof(MeshFilter))]
     public class Polygon2D : MonoBehaviour
     {
-        [SerializeField]
-        Vector2[] _points = new Vector2[3]
+        static readonly Vector2[] DefaultPoints = new Vector2[]
         {
             new Vector2(0.0f,1.0f),
             new Vector2(1f,-0.5f),
             new Vector2(-1f,-0.5f)
         };
+
+        [SerializeField] Vector2[] _points = DefaultPoints;
+
         MeshRenderer _meshRenderer = null;
         MeshFilter _meshFilter = null;
 
-#if UNITY_EDITOR
-
-#endif
-
         void Start()
         {
+            UpdateMesh();
         }
-
 
         void Update()
         {
@@ -59,18 +59,18 @@ namespace UnityEditor
 
     class Triangulator
     {
-        private List<Vector2> mPoints = new List<Vector2>();
+        private List<Vector2> _pointList = new List<Vector2>();
 
         public Triangulator(Vector2[] points)
         {
-            mPoints = new List<Vector2>(points);
+            _pointList = new List<Vector2>(points);
         }
 
         public int[] Triangulate()
         {
             List<int> indices = new List<int>();
 
-            int n = mPoints.Count;
+            int n = _pointList.Count;
             if (n < 3) return indices.ToArray();
 
             int[] V = new int[n];
@@ -125,32 +125,36 @@ namespace UnityEditor
 
         private float Area()
         {
-            int n = mPoints.Count;
-            float A = 0.0f;
+            int n = _pointList.Count;
+            float a = 0.0f;
             for (int p = n - 1, q = 0; q < n; p = q++)
             {
-                Vector2 pval = mPoints[p];
-                Vector2 qval = mPoints[q];
-                A += pval.x * qval.y - qval.x * pval.y;
+                Vector2 pval = _pointList[p];
+                Vector2 qval = _pointList[q];
+                a += pval.x * qval.y - qval.x * pval.y;
             }
-            return (A * 0.5f);
+            return a * 0.5f;
         }
 
         private bool Snip(int u, int v, int w, int n, int[] V)
         {
             int p;
-            Vector2 A = mPoints[V[u]];
-            Vector2 B = mPoints[V[v]];
-            Vector2 C = mPoints[V[w]];
-            if (Mathf.Epsilon > (((B.x - A.x) * (C.y - A.y)) - ((B.y - A.y) * (C.x - A.x))))
+            Vector2 a = _pointList[V[u]];
+            Vector2 b = _pointList[V[v]];
+            Vector2 c = _pointList[V[w]];
+            if (Mathf.Epsilon > (((b.x - a.x) * (c.y - a.y)) - ((b.y - a.y) * (c.x - a.x))))
                 return false;
             for (p = 0; p < n; p++)
             {
                 if ((p == u) || (p == v) || (p == w))
+                {
                     continue;
-                Vector2 P = mPoints[V[p]];
-                if (InsideTriangle(A, B, C, P))
+                }
+                Vector2 P = _pointList[V[p]];
+                if (InsideTriangle(a, b, c, P))
+                {
                     return false;
+                }
             }
             return true;
         }
@@ -179,55 +183,80 @@ namespace UnityEditor
     [CustomEditor(typeof(Polygon2D))]
     public class Polygon2DEditor : Editor
     {
-        const float HandleSize = 0.05f;
-        readonly Color DotColor = Color.cyan;
-        readonly Color PolygonColor = new Color(0.0f, 1.0f, 1.0f, 0.2f);
-        Vector3 handlePosition;
+        /// <summary>
+        /// ハンドルの大きさ
+        /// </summary>
+        const float HandleScale = 0.05f;
+        /// <summary>
+        /// メッシュ編集中、辺との距離がこの値より大きい時ハンドルを非表示にする
+        /// </summary>
+        const float HandleHideSideDistance = 80.0f;
+        /// <summary>
+        /// メッシュ編集中、頂点とマウスの位置がこの値より近い時ハンドルを非表示にする
+        /// 0~HandleHideSideDistanceの範囲
+        /// </summary>
+        const float HandleHidePointDistance = 20.0f;
+        readonly Color HandleColorVertex = new Color(0f, 1f, 1f);
+        readonly Color HandleColorEditing = new Color(0f, 1f, 1f);
+        readonly Color HandleColorDelete = new Color(1f, 0f, 0f);
         SerializedProperty _pointsProp = null;
+
+        bool _cached = false;
+        bool _isEditing = false;
+        int _addVertexControlId = 0;
+        int[] _controlIds = new int[0];
+        KeyCode _deleteKeycode = KeyCode.None;
+        Transform _targetTransform = null;
+        float GetHandleSize(Vector3 pos) => HandleUtility.GetHandleSize(pos) * HandleScale;
+
         void OnEnable()
         {
+            Assert.IsTrue(HandleHidePointDistance <= HandleHideSideDistance);
             _pointsProp = serializedObject.FindProperty("_points");
+            _isEditing = false;
         }
 
         void OnSceneGUI()
         {
-            if (_pointsProp.arraySize < 3) { return; }
-
-            Handles.color = DotColor;
-            var points = new Vector3[_pointsProp.arraySize];
-            var isUpdateVertex = false;
-            var t = ((MonoBehaviour)target).transform;
-
-            for (var i = 0; i < _pointsProp.arraySize; i++)
+            if (_pointsProp.arraySize >= 3 || !_isEditing)
             {
-                // 2Dのスライドするハンドルを表示
-                EditorGUI.BeginChangeCheck();
-                var prop = _pointsProp.GetArrayElementAtIndex(i);
-                var pos = (Vector3)prop.vector2Value;
-                Vector3 value = Handles.Slider2D(
-                    t.TransformPoint(pos),
-                    Vector3.forward,
-                    Vector3.right,
-                    Vector3.up,
-                    HandleUtility.GetHandleSize(t.TransformPoint(pos)) * HandleSize,
-                    Handles.DotHandleCap, 0);
-                points[i] = HandleUtility.WorldToGUIPoint(value);
-
-                Handles.Label(t.TransformPoint(pos) + new Vector3(0f, 0.3f, 0f), $"{i}", GUI.skin.label);
-                if (EditorGUI.EndChangeCheck() && !float.IsNaN(value.x) && !float.IsNaN(value.y) && !float.IsNaN(value.z))
-                {
-                    isUpdateVertex = true;
-                    prop.vector2Value = (Vector2)t.InverseTransformPoint(value);
-                    serializedObject.ApplyModifiedProperties();
-                }
+                return;
             }
 
-            var mousePos = Event.current.mousePosition;
+            if (!_cached)
+            {
+                // ControlIdを割り振る
+                _cached = true;
+                _deleteKeycode = KeyCode.None;
+                _targetTransform = ((Polygon2D)target).transform;
+                SetControlId();
+            }
+
+            if (_controlIds.Length != _pointsProp.arraySize)
+            {
+                SetControlId();
+            }
+
+            var e = Event.current;
+            CheckDeleteFlag(e);
+            var points = new Vector3[_pointsProp.arraySize];
+            for (var i = 0; i < _pointsProp.arraySize; i++)
+            {
+                var prop = _pointsProp.GetArrayElementAtIndex(i);
+                points[i] = _targetTransform.TransformPoint((Vector3)prop.vector2Value);
+            }
+
+            var mousePos = e.mousePosition;
+
+            // 一番近い辺を見つける
             (int index, float distance, Vector2 pos) near = (0, float.MaxValue, Vector2.zero);
             for (var i = 0; i < points.Length; i++)
             {
                 var nextIdx = (i + 1) % points.Length;
-                var nearPoint = GetNearPointDistance(mousePos, points[i], points[nextIdx]);
+                var nearPoint = GetNearPointDistance(
+                    mousePos,
+                    HandleUtility.WorldToGUIPoint(points[i]),
+                    HandleUtility.WorldToGUIPoint(points[nextIdx]));
                 var dis = Vector2.Distance(mousePos, nearPoint);
                 if (dis > near.distance)
                 {
@@ -236,35 +265,219 @@ namespace UnityEditor
                 near = (i, dis, nearPoint);
             }
 
-            Vector3 a = Handles.Slider2D(
-                GUIPointToWorldPos(near.pos),
-                Vector3.forward,
-                Vector3.right,
-                Vector3.up,
-                HandleUtility.GetHandleSize(GUIPointToWorldPos(near.pos)) * HandleSize,
-                Handles.DotHandleCap, 0);
+            var p1 = Vector2.Distance(near.pos, HandleUtility.WorldToGUIPoint(points[near.index]));
+            var p2 = Vector2.Distance(near.pos, HandleUtility.WorldToGUIPoint(points[(near.index + 1) % points.Length]));
 
+            // 辺とマウスの位置が近いかどうか
+            var isNearSide = near.distance < HandleHideSideDistance;
+            var nearIdx = p1 < p2 ?
+                near.index :
+                (near.index + 1) % points.Length;
 
-
-            if (isUpdateVertex)
+            for (var i = 0; i < points.Length; i++)
             {
-                ((Polygon2D)target).UpdateMesh();
+                var id = _controlIds[i];
+
+                // 頂点削除チェック
+                if (e.type == EventType.MouseDown && HandleUtility.nearestControl == id && _deleteKeycode != KeyCode.None)
+                {
+                    DeleteVertex(i);
+                    return;
+                }
+
+                Handles.color =
+                    _deleteKeycode != KeyCode.None && isNearSide && i == nearIdx ?
+                    HandleColorDelete :
+                    HandleColorVertex;
+
+                // 2Dのスライドするハンドルを表示
+                EditorGUI.BeginChangeCheck();
+                var updatePos = Handles.Slider2D(
+                    id,
+                    points[i],
+                    _targetTransform.forward,
+                    _targetTransform.right,
+                    _targetTransform.up,
+                    GetHandleSize(points[i]),
+                    Handles.DotHandleCap,
+                    Vector2.zero);
+
+                if (EditorGUI.EndChangeCheck() && !float.IsNaN(updatePos.x) && !float.IsNaN(updatePos.y) && !float.IsNaN(updatePos.z))
+                {
+                    var prop = _pointsProp.GetArrayElementAtIndex(i);
+                    prop.vector2Value = (Vector2)_targetTransform.InverseTransformPoint(updatePos);
+                    serializedObject.ApplyModifiedProperties();
+                }
             }
+
+            // 頂点と近すぎる時や、辺との距離が遠すぎる時は表示しない
+            if (near.distance < HandleHideSideDistance &&
+                p1 > HandleHidePointDistance &&
+                p2 > HandleHidePointDistance &&
+                _deleteKeycode == KeyCode.None)
+            {
+                var nearWorldPos = GUIPointToWorldPos(near.pos);
+                if (e.type == EventType.MouseDown && HandleUtility.nearestControl == _addVertexControlId)
+                {
+                    InsertPosition(near.index, _targetTransform.InverseTransformPoint(nearWorldPos));
+                    SetControlId(near.index + 1);
+                    return;
+                }
+
+                Handles.color = HandleColorEditing;
+                var targetPos = GUIPointToWorldPos(near.pos);
+                Handles.Slider2D(
+                    _addVertexControlId,
+                    nearWorldPos,
+                    _targetTransform.forward,
+                    _targetTransform.right,
+                    _targetTransform.up,
+                    GetHandleSize(nearWorldPos),
+                    Handles.DotHandleCap,
+                    Vector2.zero);
+
+                // string controlIdsStr = "";
+                // for (var i = 0; i < _controlIds.Length; i++)
+                // {
+                //     controlIdsStr += $"[{i}]:{_controlIds[i]}\n";
+                // }
+                // controlIdsStr += $"addVertex:{_addVertexControlId}";
+                // Debug.Log(controlIdsStr);
+            }
+
+            SceneView.RepaintAll();
+        }
+
+        public override void OnInspectorGUI()
+        {
+            EditorGUI.BeginChangeCheck();
+            _isEditing = GUILayout.Toggle(_isEditing, _isEditing ? "編集中" : "メッシュを編集する", "Button");
+            if (EditorGUI.EndChangeCheck())
+            {
+                if (_isEditing)
+                {
+                    EditVertexStart();
+                }
+                else
+                {
+                    EditVertexEnd();
+                }
+            }
+
+            if (_isEditing)
+            {
+                serializedObject.Update();
+            }
+            base.OnInspectorGUI();
+        }
+
+        /// <summary>
+        /// 頂点削除フラグのON,OFFの切り替えチェック
+        /// </summary>
+        /// <param name="e"></param>
+        void CheckDeleteFlag(Event e)
+        {
+            if (e.type == EventType.KeyDown &&
+                _deleteKeycode == KeyCode.None && (
+                e.keyCode == KeyCode.LeftControl ||
+                e.keyCode == KeyCode.RightControl ||
+                e.keyCode == KeyCode.LeftCommand ||
+                e.keyCode == KeyCode.RightCommand))
+            {
+                _deleteKeycode = e.keyCode;
+            }
+            else if (e.type == EventType.KeyUp && e.keyCode == _deleteKeycode)
+            {
+                _deleteKeycode = KeyCode.None;
+            }
+        }
+
+        void EditVertexStart()
+        {
+            //Debug.Log("編集開始");
+        }
+
+        void EditVertexEnd()
+        {
+            //Debug.Log("編集終了");
+            serializedObject.ApplyModifiedProperties();
+        }
+
+        /// <summary>
+        /// 頂点を追加
+        /// </summary>
+        /// <param name="index"></param>
+        /// <param name="pos"></param>
+        void InsertPosition(int index, Vector2 pos)
+        {
+            _pointsProp.arraySize++;
+            for (var i = _pointsProp.arraySize - 1; i > index; i--)
+            {
+                var prop = _pointsProp.GetArrayElementAtIndex(i);
+                if (i == index + 1)
+                {
+                    prop.vector2Value = pos;
+                }
+                else
+                {
+                    var preProp = _pointsProp.GetArrayElementAtIndex(i - 1);
+                    prop.vector2Value = preProp.vector2Value;
+                }
+            }
+            serializedObject.ApplyModifiedProperties();
+        }
+
+        /// <summary>
+        /// 頂点を削除
+        /// </summary>
+        /// <param name="index"></param>
+        void DeleteVertex(int index)
+        {
+            if (_pointsProp.arraySize <= 3)
+            {
+                Debug.Log("最低でもポリゴン数は3つ");
+                return;
+            }
+
+            for (var i = 0; i < _pointsProp.arraySize; i++)
+            {
+                if (i <= index)
+                {
+                    continue;
+                }
+                _pointsProp.GetArrayElementAtIndex(i - 1).vector2Value =
+                _pointsProp.GetArrayElementAtIndex(i).vector2Value;
+            }
+
+            _pointsProp.arraySize--;
+            serializedObject.ApplyModifiedProperties();
+        }
+
+        void SetControlId() => SetControlId(-1);
+        void SetControlId(int addVertexIndex)
+        {
+            _controlIds = new int[_pointsProp.arraySize];
+            for (var i = 0; i < _pointsProp.arraySize; i++)
+            {
+                var id = GUIUtility.GetControlID(i, FocusType.Passive);
+                _controlIds[i] = id;
+                if (i == addVertexIndex)
+                {
+                    GUIUtility.hotControl = id;
+                }
+            }
+            _addVertexControlId = GUIUtility.GetControlID(_pointsProp.arraySize, FocusType.Passive);
         }
 
         Vector3 GUIPointToWorldPos(Vector2 pos)
         {
             var ray = HandleUtility.GUIPointToWorldRay(pos);
-            var x0 = ray.origin;
+            var r0 = ray.origin;
             var m = ray.direction;
-            var t = ((Polygon2D)target).transform;
-            var n = -t.forward;
-            var x = t.position;
-            var h = Vector3.Dot(n, x);
-            return x0 + ((h - Vector3.Dot(x, x0)) / Vector3.Dot(n, m)) * m;
+            var n = -((Polygon2D)target).transform.forward;
+            var h = Vector3.Dot(n, ((Polygon2D)target).transform.position);
+            return r0 + (h - Vector3.Dot(n, r0)) / Vector3.Dot(n, m) * m;
         }
-
-
 
         Vector2 GetNearPointDistance(Vector2 checkPoint, Vector2 p1, Vector2 p2)
         {
