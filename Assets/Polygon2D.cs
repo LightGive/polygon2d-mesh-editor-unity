@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using UnityEngine.Assertions;
 
 
-
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
@@ -205,7 +204,6 @@ namespace UnityEditor
         bool _isEditing = false;
         int _addVertexControlId = 0;
         int[] _controlIds = new int[0];
-        KeyCode _deleteKeycode = KeyCode.None;
         Transform _targetTransform = null;
         float GetHandleSize(Vector3 pos) => HandleUtility.GetHandleSize(pos) * HandleScale;
 
@@ -218,18 +216,18 @@ namespace UnityEditor
 
         void OnSceneGUI()
         {
-            if (_pointsProp.arraySize >= 3 || !_isEditing)
-            {
-                return;
-            }
-
             if (!_cached)
             {
                 // ControlIdを割り振る
                 _cached = true;
-                _deleteKeycode = KeyCode.None;
                 _targetTransform = ((Polygon2D)target).transform;
+                _pointsProp = serializedObject.FindProperty("_points");
                 SetControlId();
+            }
+
+            if (_pointsProp.arraySize < 3 || !_isEditing)
+            {
+                return;
             }
 
             if (_controlIds.Length != _pointsProp.arraySize)
@@ -238,7 +236,9 @@ namespace UnityEditor
             }
 
             var e = Event.current;
-            CheckDeleteFlag(e);
+            var isDeleteKeyPressed =
+                Keyboard.current.commaKey.isPressed ||
+                Keyboard.current.ctrlKey.isPressed;
             var points = new Vector3[_pointsProp.arraySize];
             for (var i = 0; i < _pointsProp.arraySize; i++)
             {
@@ -279,14 +279,14 @@ namespace UnityEditor
                 var id = _controlIds[i];
 
                 // 頂点削除チェック
-                if (e.type == EventType.MouseDown && HandleUtility.nearestControl == id && _deleteKeycode != KeyCode.None)
+                if (e.type == EventType.MouseDown && HandleUtility.nearestControl == id && isDeleteKeyPressed)
                 {
                     DeleteVertex(i);
                     return;
                 }
 
                 Handles.color =
-                    _deleteKeycode != KeyCode.None && isNearSide && i == nearIdx ?
+                    isDeleteKeyPressed && isNearSide && i == nearIdx ?
                     HandleColorDelete :
                     HandleColorVertex;
 
@@ -314,7 +314,7 @@ namespace UnityEditor
             if (near.distance < HandleHideSideDistance &&
                 p1 > HandleHidePointDistance &&
                 p2 > HandleHidePointDistance &&
-                _deleteKeycode == KeyCode.None)
+                !isDeleteKeyPressed)
             {
                 var nearWorldPos = GUIPointToWorldPos(near.pos);
                 if (e.type == EventType.MouseDown && HandleUtility.nearestControl == _addVertexControlId)
@@ -369,27 +369,6 @@ namespace UnityEditor
                 serializedObject.Update();
             }
             base.OnInspectorGUI();
-        }
-
-        /// <summary>
-        /// 頂点削除フラグのON,OFFの切り替えチェック
-        /// </summary>
-        /// <param name="e"></param>
-        void CheckDeleteFlag(Event e)
-        {
-            if (e.type == EventType.KeyDown &&
-                _deleteKeycode == KeyCode.None && (
-                e.keyCode == KeyCode.LeftControl ||
-                e.keyCode == KeyCode.RightControl ||
-                e.keyCode == KeyCode.LeftCommand ||
-                e.keyCode == KeyCode.RightCommand))
-            {
-                _deleteKeycode = e.keyCode;
-            }
-            else if (e.type == EventType.KeyUp && e.keyCode == _deleteKeycode)
-            {
-                _deleteKeycode = KeyCode.None;
-            }
         }
 
         void EditVertexStart()
